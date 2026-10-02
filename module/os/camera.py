@@ -2,7 +2,8 @@ import numpy as np
 
 from module.base.button import Button
 from module.base.decorator import cached_property
-from module.exception import MapDetectionError
+from module.base.timer import Timer
+from module.exception import GameStuckError, MapDetectionError
 from module.logger import logger
 from module.map.camera import Camera
 from module.map.map_base import location2node, location_ensure
@@ -124,14 +125,68 @@ class OSCamera(OSMapOperation, Camera):
         However, Azur Lane may bugged, not focusing current.
         In this case, the convert should base on fleet position.
 
+        If target grid is beyond a map edge detected in local view, the edge is a misdetection,
+        because radar shows that the grid exists.
+        This happens when the commander dialog popup after auto search is still on screen,
+        its bottom border is detected as map edge. Re-detect local view until the popup is gone.
+
         Args:
             location: (x, y), Position on radar.
 
         Returns:
             OSGrid: Grid instance in self.view
+
+        Raises:
+            KeyError: If target grid not in local view.
+            GameStuckError: If target grid stays beyond a misdetected map edge.
         """
         location = location_ensure(location)
 
+        timeout = Timer(10, count=10).start()
+        while 1:
+            try:
+                return self._convert_radar_to_local(location)
+            except KeyError as e:
+                # e.args[0] is the grid location that is not in local view
+                if not self._is_beyond_view_edge(e.args[0]):
+                    raise
+                if timeout.reached():
+                    raise GameStuckError('Radar target grid stays beyond a misdetected map edge')
+                logger.warning(f'Radar target grid {e.args[0]} is beyond a map edge in local view, '
+                               f'map edge is misdetected, re-detect local view')
+
+            self.device.screenshot()
+            self.update_os()
+            self.view.predict()
+
+    def _is_beyond_view_edge(self, local):
+        """
+        Args:
+            local: (x, y), Grid location not in local view.
+
+        Returns:
+            bool: If a map edge detected in local view lies between local view and the grid.
+        """
+        x, y = local
+        backend = self.view.backend
+        return bool(
+            (x < 0 and backend.left_edge)
+            or (x > self.view.shape[0] and backend.right_edge)
+            or (y < 0 and backend.lower_edge)
+            or (y > self.view.shape[1] and backend.upper_edge)
+        )
+
+    def _convert_radar_to_local(self, location):
+        """
+        Args:
+            location: (x, y), Position on radar.
+
+        Returns:
+            OSGrid: Grid instance in self.view
+
+        Raises:
+            KeyError: If target grid not in local view.
+        """
         fleets = self.view.select(is_current_fleet=True)
         if fleets.count == 1:
             center = fleets[0].location
