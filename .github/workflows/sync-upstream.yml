@@ -5,10 +5,8 @@
 #   ALAS skips updating forever if the deployed commit becomes unreachable
 #   (module/webui/updater.py `Cannot find local commit ... skip update`).
 # - On merge conflict the job fails and `patched` stays at the last good commit.
-#   GitHub emails the failure to whoever last modified the cron below.
-# - The schedule is registered when this file is pushed to the default branch.
-#   Pushing it before `patched` became the default branch left the schedule
-#   unregistered (no scheduled runs at all); push a change to this file to fix.
+#   GitHub emails the failure to whoever last modified the cron below, and the
+#   last step sends it to Telegram (secrets TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID).
 
 name: Sync upstream
 
@@ -16,8 +14,6 @@ on:
   schedule:
     # 03:23 Asia/Shanghai is right before ALAS AutoRestartTime 03:50
     - cron: '23 1,7,13,19 * * *'
-    # TEMP: one-shot to verify schedule registration, remove after it fires
-    - cron: '57 14 2 10 *'
   workflow_dispatch:
     inputs:
       simulate_failure:
@@ -67,3 +63,16 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git merge --no-edit upstream/master
           git push origin HEAD:patched
+
+      - name: Notify Telegram on failure
+        if: ${{ failure() }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TEXT: >-
+            ALAS fork sync failed (${{ github.event_name }}), patched stays at the last good commit.
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          curl -sS --fail-with-body --max-time 30 -o /dev/null \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${TEXT}" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
