@@ -6,6 +6,9 @@
 #   (module/webui/updater.py `Cannot find local commit ... skip update`).
 # - On merge conflict the job fails and `patched` stays at the last good commit.
 #   GitHub emails the failure to whoever last modified the cron below.
+# - The schedule is registered when this file is pushed to the default branch.
+#   Pushing it before `patched` became the default branch left the schedule
+#   unregistered (no scheduled runs at all); push a change to this file to fix.
 
 name: Sync upstream
 
@@ -13,6 +16,8 @@ on:
   schedule:
     # 03:23 Asia/Shanghai is right before ALAS AutoRestartTime 03:50
     - cron: '23 1,7,13,19 * * *'
+    # TEMP: one-shot to verify schedule registration, remove after it fires
+    - cron: '57 14 2 10 *'
   workflow_dispatch:
     inputs:
       simulate_failure:
