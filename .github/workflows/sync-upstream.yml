@@ -1,0 +1,64 @@
+# Keep `patched` (the branch ALAS deploys from) up to date with upstream.
+#
+# - Fork `master` mirrors upstream `master`, fast-forward only.
+# - Upstream `master` is merged into `patched`. Never rebase or force-push:
+#   ALAS skips updating forever if the deployed commit becomes unreachable
+#   (module/webui/updater.py `Cannot find local commit ... skip update`).
+# - On merge conflict the job fails and `patched` stays at the last good commit.
+#   GitHub emails the failure to whoever last modified the cron below.
+
+name: Sync upstream
+
+on:
+  schedule:
+    # 03:23 Asia/Shanghai is right before ALAS AutoRestartTime 03:50
+    - cron: '23 1,7,13,19 * * *'
+  workflow_dispatch:
+    inputs:
+      simulate_failure:
+        description: 'Fail on purpose to test failure notification'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Simulate failure
+        if: ${{ inputs.simulate_failure }}
+        run: |
+          echo "::error::Simulated failure to test notification"
+          exit 1
+
+      - uses: actions/checkout@v7
+        with:
+          ref: patched
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/LmeSzinc/AzurLaneAutoScript.git
+          git fetch upstream master
+
+      - name: Mirror upstream master to fork master
+        # Plain push, fails instead of overwriting if fork master ever diverges
+        run: git push origin refs/remotes/upstream/master:refs/heads/master
+
+      - name: Merge upstream master into patched
+        run: |
+          if git merge-base --is-ancestor upstream/master HEAD; then
+            echo "patched already contains upstream/master"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git merge --no-edit upstream/master
+          git push origin HEAD:patched
