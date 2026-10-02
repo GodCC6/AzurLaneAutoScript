@@ -279,6 +279,9 @@ class Camera(MapOperation):
 
         def is_still_prev():
             # Still the same as prev view
+            # No prev view to compare (e.g. swipe from "Camera outside map" in map_init), assume swiped
+            if prev_center_offset is None:
+                return False
             return np.linalg.norm(self.view.center_offset - prev_center_offset) < 0.001
 
         while 1:
