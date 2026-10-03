@@ -15,6 +15,7 @@ from module.webui.fake_pil_module import *
 
 import_fake_pil_module()
 
+from module.hang_dump import install_hang_dump
 from module.logger import logger, set_file_logger, set_func_logger
 from module.submodule.submodule import load_mod
 from module.submodule.utils import get_available_func, get_available_mod, get_available_mod_func, get_config_mod, \
@@ -143,6 +144,7 @@ class ProcessManager:
 
         # Setup logger
         set_file_logger(name=config_name)
+        install_hang_dump(config_name)
         if State.electron:
             # https://github.com/LmeSzinc/AzurLaneAutoScript/issues/2051
             logger.info("Electron detected, remove log output to stdout")
