@@ -392,6 +392,13 @@ class UI(InfoHandler):
             logger.info(f'UI additional: {EVENT_LIST_CHECK} -> {GOTO_MAIN}')
             if self.appear_then_click(GOTO_MAIN, offset=(30, 30)):
                 return True
+        # 2026.10.08, the "selective rerun" event page (CAPSULE RERUN) is opened by the new event icon at the
+        # upper-right of page_main, which is exactly where LOGIN_ANNOUNCE_2 is clicked after the announcement closes.
+        # Its home button doesn't match GOTO_MAIN, so click the GOTO_MAIN area blindly.
+        if self.appear(CAPSULE_RERUN_CHECK, offset=(30, 30), interval=3):
+            logger.info(f'UI additional: {CAPSULE_RERUN_CHECK} -> {GOTO_MAIN}')
+            self.device.click(GOTO_MAIN)
+            return True
         # Monthly pass is about to expire
         if self.appear_then_click(MONTHLY_PASS_NOTICE, offset=(30, 30), interval=3):
             return True
