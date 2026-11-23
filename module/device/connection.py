@@ -81,6 +81,10 @@ def retry(func):
     return retry_wrapper
 
 
+class AdbNcReadTimeout(AdbTimeout):
+    """Reading an ADB or reverse stream for an NC command timed out."""
+
+
 class AdbDeviceWithStatus(AdbDevice):
     def __init__(self, client: AdbClient, serial: str, status: str):
         self.status = status
@@ -542,21 +546,29 @@ class Connection(ConnectionAttr):
         # Client send data, waiting for server accept
         # <command> | nc 127.0.0.1 {port}
         cmd += ["|", *self.nc_command, *self._nc_server_host_port[2:]]
-        stream = self.adb_shell(cmd, stream=True, recvall=False)
         try:
-            # Server accept connection
-            conn, conn_port = server.accept()
-        except socket.timeout:
-            output = recv_all(stream, chunk_size=chunk_size)
-            logger.warning(str(output))
-            raise AdbTimeout('reverse server accept timeout')
+            stream = self.adb_shell(cmd, stream=True, recvall=False)
+        except AdbTimeout as e:
+            raise AdbNcReadTimeout('ADB shell read timeout while starting NC command') from e
+        try:
+            try:
+                conn, _ = server.accept()
+            except socket.timeout:
+                try:
+                    output = recv_all(stream, chunk_size=chunk_size)
+                except AdbTimeout as e:
+                    raise AdbNcReadTimeout('ADB shell read timeout after reverse server accept timeout') from e
+                logger.warning(str(output))
+                raise AdbTimeout('reverse server accept timeout')
 
-        # Server receive data
-        data = recv_all(conn, chunk_size=chunk_size, recv_interval=0.001)
-
-        # Server close connection
-        conn.close()
-        return data
+            with conn:
+                try:
+                    return recv_all(conn, chunk_size=chunk_size, recv_interval=0.001)
+                except AdbTimeout as e:
+                    raise AdbNcReadTimeout('reverse connection read timeout') from e
+        finally:
+            if not self.config.DEVICE_OVER_HTTP:
+                stream.close()
 
     def adb_exec_out(self, cmd, serial=None):
         cmd.insert(0, 'exec-out')

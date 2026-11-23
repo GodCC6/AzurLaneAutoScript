@@ -1,7 +1,7 @@
 import re
 import time
 from contextlib import contextmanager
-from functools import wraps
+from functools import partial, wraps
 
 import cv2
 import numpy as np
@@ -10,15 +10,15 @@ from lxml import etree
 
 from module.base.decorator import Config
 from module.config.server import DICT_PACKAGE_TO_ACTIVITY
-from module.device.connection import Connection
+from module.device.connection import AdbNcReadTimeout, Connection
 from module.device.method.remove_warning import remove_screenshot_warning
 from module.device.method.utils import (ImageTruncated, PackageNotInstalled, RETRY_TRIES, handle_adb_error,
-                                        handle_unknown_host_service, retry_sleep)
+                                        handle_unknown_host_service, recv_all, retry_sleep)
 from module.exception import RequestHumanTakeover, ScriptError
 from module.logger import logger
 
 
-def retry(func):
+def retry(func, *, nc_screenshot=False):
     @wraps(func)
     def retry_wrapper(self, *args, **kwargs):
         """
@@ -26,6 +26,7 @@ def retry(func):
             self (Adb):
         """
         init = None
+        tried_direct = False
         for _ in range(RETRY_TRIES):
             try:
                 if callable(init):
@@ -43,6 +44,21 @@ def retry(func):
                     self.adb_reconnect()
             # AdbError
             except AdbError as e:
+                # The reverse listener setup has already identified BlueStacks Air. Do not probe ADB again.
+                if (nc_screenshot and not tried_direct and isinstance(e, AdbNcReadTimeout)
+                        and not self.config.DEVICE_OVER_HTTP and self.__dict__.get('is_bluestacks_air')):
+                    tried_direct = True
+                    # Discard a late NC connection so it cannot supply a stale frame to a later screenshot.
+                    listener = self.__dict__.pop('reverse_server', None)
+                    if listener is not None:
+                        listener.close()
+                    try:
+                        image = self._screenshot_adb_native()
+                    except (AdbError, OSError, ImageTruncated, cv2.error) as direct_error:
+                        logger.warning('Direct ADB screenshot after NC timeout failed: %s', type(direct_error).__name__)
+                    else:
+                        logger.warning('ADB_nc timed out (%s); used direct ADB screenshot', e)
+                        return image
                 if handle_adb_error(e):
                     def init():
                         self.adb_reconnect()
@@ -214,7 +230,11 @@ class Adb(Connection):
     @retry
     @Config.when(DEVICE_OVER_HTTP=False)
     def screenshot_adb(self):
-        data = self.adb_shell(['screencap', '-p'], stream=True)
+        return self._screenshot_adb_native()
+
+    def _screenshot_adb_native(self):
+        with self.adb_shell(['screencap', '-p'], stream=True, recvall=False) as stream:
+            data = recv_all(stream)
         if len(data) < 500:
             logger.warning(f'Unexpected screenshot: {data}')
 
@@ -230,7 +250,7 @@ class Adb(Connection):
 
         return load_screencap(data)
 
-    @retry
+    @partial(retry, nc_screenshot=True)
     def screenshot_adb_nc(self):
         data = self.adb_shell_nc(['screencap'])
         data = remove_screenshot_warning(data)
