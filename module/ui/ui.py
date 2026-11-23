@@ -22,6 +22,15 @@ from module.ui.page import Page, page_academy, page_campaign, page_event, page_m
 from module.ui_white.assets import *
 
 
+# The JP defeat overlay has a distinct title above a centered Back button.
+JP_DEFEAT_BACK = Button(
+    area=(508, 150, 771, 181),
+    color=(175, 140, 144),
+    button=(600, 600, 656, 632),
+    file='./assets/jp/ui/JP_DEFEAT_BACK.png',
+)
+
+
 class UI(InfoHandler):
     ui_current: Page
 
@@ -207,6 +216,10 @@ class UI(InfoHandler):
                 timeout.reset()
                 continue
             if self.appear_then_click(RPG_HOME, offset=(30, 30), interval=2):
+                timeout.reset()
+                continue
+            if self.config.SERVER == 'jp' and self.appear_then_click(
+                    JP_DEFEAT_BACK, offset=4, interval=3, similarity=0.9):
                 timeout.reset()
                 continue
             if self.ui_additional():
