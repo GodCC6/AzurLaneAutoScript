@@ -1,18 +1,9 @@
-# Keep `patched` (the branch ALAS deploys from) up to date with upstream.
-#
-# - Fork `master` mirrors upstream `master`, fast-forward only.
-# - Upstream `master` is merged into `patched`. Never rebase or force-push:
-#   ALAS skips updating forever if the deployed commit becomes unreachable
-#   (module/webui/updater.py `Cannot find local commit ... skip update`).
-# - On merge conflict the job fails and `patched` stays at the last good commit.
-#   GitHub emails the failure to whoever last modified the cron below, and the
-#   last step sends it to Telegram (secrets TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID).
-
+# Keep the fork's master a pure mirror; only publish a validated merge to patched.
 name: Sync upstream
 
 on:
   schedule:
-    # 03:23 Asia/Shanghai is right before ALAS AutoRestartTime 03:50
+    # Asia/Shanghai: 03:23, 09:23, 15:23, 21:23.
     - cron: '23 1,7,13,19 * * *'
   workflow_dispatch:
     inputs:
@@ -21,58 +12,97 @@ on:
         type: boolean
         default: false
 
-permissions:
-  contents: write
-
+permissions: {}
 concurrency:
   group: sync-upstream
   cancel-in-progress: false
 
 jobs:
-  sync:
+  mirror:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Simulate failure
         if: ${{ inputs.simulate_failure }}
         run: |
-          echo "::error::Simulated failure to test notification"
+          echo '::error::Simulated failure to test notification'
           exit 1
-
       - uses: actions/checkout@v7
         with:
-          ref: patched
+          ref: ${{ github.sha }}
           fetch-depth: 0
           filter: blob:none
-
-      - name: Fetch upstream
+      - name: Fast-forward master mirror
         run: |
-          git remote add upstream https://github.com/LmeSzinc/AzurLaneAutoScript.git
-          git fetch upstream master
+          git fetch https://github.com/LmeSzinc/AzurLaneAutoScript.git master
+          git push origin FETCH_HEAD:refs/heads/master
 
-      - name: Mirror upstream master to fork master
-        # Plain push, fails instead of overwriting if fork master ever diverges
-        run: git push origin refs/remotes/upstream/master:refs/heads/master
+  prepare:
+    needs: mirror
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      mode: ${{ steps.prepare.outputs.mode }}
+      fingerprint: ${{ steps.prepare.outputs.fingerprint }}
+      patched: ${{ steps.prepare.outputs.patched }}
+      upstream: ${{ steps.prepare.outputs.upstream }}
+      candidate: ${{ steps.prepare.outputs.candidate }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Merge and validate without write credentials
+        id: prepare
+        run: bash .github/scripts/sync-prepare.sh
+      - uses: actions/upload-artifact@v4
+        if: steps.prepare.outputs.mode == 'candidate'
+        with:
+          name: sync-candidate
+          path: ${{ runner.temp }}/candidate.bundle
+          if-no-files-found: error
+          retention-days: 1
 
-      - name: Merge upstream master into patched
-        run: |
-          if git merge-base --is-ancestor upstream/master HEAD; then
-            echo "patched already contains upstream/master"
-            exit 0
-          fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git merge --no-edit upstream/master
-          git push origin HEAD:patched
-
-      - name: Notify Telegram on failure
-        if: ${{ failure() }}
+  publish:
+    needs: [mirror, prepare]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        if: needs.prepare.result == 'success' && needs.prepare.outputs.mode == 'candidate'
+        with:
+          name: sync-candidate
+          path: ${{ runner.temp }}
+      - name: Publish checked commit or record merge incident
+        id: publish
+        env:
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          MODE: ${{ needs.prepare.outputs.mode }}
+          EXPECTED_PATCHED: ${{ needs.prepare.outputs.patched }}
+          EXPECTED_UPSTREAM: ${{ needs.prepare.outputs.upstream }}
+          CANDIDATE: ${{ needs.prepare.outputs.candidate }}
+          FINGERPRINT: ${{ needs.prepare.outputs.fingerprint }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: bash .github/scripts/sync-publish.sh
+      - name: Notify Telegram of unexpected failure
+        if: ${{ failure() && steps.publish.outputs.handled != 'true' }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TEXT: >-
-            ALAS fork sync failed (${{ github.event_name }}), patched stays at the last good commit.
-            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           curl -sS --fail-with-body --max-time 30 -o /dev/null \
-            -d "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${TEXT}" \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+            -d "chat_id=$TELEGRAM_CHAT_ID" \
+            --data-urlencode "text=ALAS sync failed; check the failed step. $RUN_URL" \
+            "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage"
