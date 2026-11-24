@@ -4,8 +4,7 @@ import inflection
 
 from module.base.timer import Timer
 from module.config.utils import get_os_reset_remain
-from module.exception import CampaignEnd, GameStuckError, GameTooManyClickError, MapWalkError, RequestHumanTakeover, \
-    ScriptError
+from module.exception import CampaignEnd, GameStuckError, GameTooManyClickError, MapWalkError, RequestHumanTakeover, ScriptError
 from module.handler.login import LoginHandler, MAINTENANCE_ANNOUNCE
 from module.logger import logger
 from module.map.map import Map
@@ -20,8 +19,6 @@ from module.ui.assets import GOTO_MAIN
 from module.ui.page import page_os
 
 
-# Seconds the daemon may stay on the OS map without a combat, a click or a map event before it gives up.
-# The game normally starts a new combat within a minute or two, so this is generous.
 OS_AUTO_SEARCH_IDLE_LIMIT = 600
 
 
@@ -492,6 +489,8 @@ class OSMap(OSFleet, Map, GlobeCamera, StrategicSearchHandler):
         finished_combat = 0
         died_timer = Timer(1.5, count=3)
         idle_timer = Timer(OS_AUTO_SEARCH_IDLE_LIMIT).start()
+        self.walk_counter_changed(reset=True)
+        self.device.stuck_record_clear()
         self.hp_reset()
         for _ in self.loop():
             # End
@@ -500,19 +499,28 @@ class OSMap(OSFleet, Map, GlobeCamera, StrategicSearchHandler):
                 logger.critical('Please finish the story mode of OpSi to unlock auto search '
                                 'before using any OpSi functions')
                 raise RequestHumanTakeover
-            if self.is_in_map():
-                # Staying on the map clears the stuck watchdog, so the idle timer is the only bound on this loop.
-                self.device.stuck_record_clear()
-                if idle_timer.reached():
-                    logger.warning(f'OS auto search made no progress for {OS_AUTO_SEARCH_IDLE_LIMIT}s on the map')
-                    raise GameStuckError('OS auto search idle on map')
+            in_map = self.is_in_map()
+            if in_map:
                 if not success:
+                    self.walk_counter_changed(reset=True)
+                    self.device.stuck_record_clear()
                     if died_timer.reached():
                         logger.warning('Fleet died confirm')
                         break
                 else:
                     died_timer.reset()
+                    if self.match_template_color(AUTO_SEARCH_OS_MAP_OPTION_ON, offset=(5, 120)):
+                        # An enabled auto button alone does not prove the fleet is moving.
+                        if self.walk_counter_changed():
+                            idle_timer.reset()
+                            self.device.stuck_record_clear()
+                    elif self.match_template_color(AUTO_SEARCH_OS_MAP_OPTION_OFF, offset=(5, 120)) \
+                            or self.match_template_color(AUTO_SEARCH_OS_MAP_OPTION_OFF_DISABLED, offset=(5, 120)):
+                        self.walk_counter_changed(reset=True)
+                        self.device.stuck_record_clear()
             else:
+                self.walk_counter_changed(reset=True)
+                idle_timer.reset()
                 died_timer.reset()
 
             if not unlock_checked:
@@ -527,15 +535,18 @@ class OSMap(OSFleet, Map, GlobeCamera, StrategicSearchHandler):
                     drop=drop,
                     enable=success
             ):
+                self.walk_counter_changed(reset=True)
                 unlock_checked = True
                 idle_timer.reset()
                 continue
             if self.handle_retirement():
                 # Retire will interrupt auto search, need a retry
+                self.walk_counter_changed(reset=True)
                 self.ash_popup_canceled = True
                 idle_timer.reset()
                 continue
             if self.combat_appear():
+                self.walk_counter_changed(reset=True)
                 self.on_auto_search_battle_count_add()
                 if strategic and self.config.task_switched():
                     self.interrupt_auto_search()
@@ -551,8 +562,15 @@ class OSMap(OSFleet, Map, GlobeCamera, StrategicSearchHandler):
                         continue
             if self.handle_map_event():
                 # Auto search can not handle siren searching device.
+                self.walk_counter_changed(reset=True)
                 idle_timer.reset()
                 continue
+
+            # Upstream clears the device watchdog on OFF/disabled frames.
+            # Keep a backstop if the map remains visible without real progress.
+            if success and in_map and idle_timer.reached():
+                logger.warning(f'OS auto search made no progress for {OS_AUTO_SEARCH_IDLE_LIMIT}s on the map')
+                raise GameStuckError('OS auto search idle on map')
 
         return finished_combat
 

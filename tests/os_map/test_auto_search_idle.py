@@ -75,6 +75,12 @@ class FakeOSMap:
     def appear(self, *args, **kwargs):
         return True  # unlock check passes at once
 
+    def match_template_color(self, *args, **kwargs):
+        return False
+
+    def walk_counter_changed(self, reset=False):
+        return None if reset else False
+
     def handle_os_auto_search_map_option(self, drop=None, enable=True):
         if self.end_after is not None and self.clock['t'] - self.started_at >= self.end_after:
             raise CampaignEnd
